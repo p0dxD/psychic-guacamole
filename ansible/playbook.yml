@@ -1,0 +1,312 @@
+---
+- name: Deploy personal apps
+  hosts: control
+  vars:
+    ansible_python_interpreter: auto
+    helm_chart_url: "https://charts.bitnami.com/bitnami"
+  environment:
+    KUBECONFIG: /home/pi/.kube/config
+  tasks:
+  - name: Add helm repo
+    kubernetes.core.helm_repository:
+      name: bitnami
+      repo_url: "{{ helm_chart_url }}"
+
+# add secrets
+  - name: Create cloudflare api secret
+    tags: ingress
+    become: true
+    become_user: pi
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: cloudflare-api-key-secret
+          namespace: development
+        type: Opaque
+        stringData:
+          api-key: !vault |
+                    $ANSIBLE_VAULT;1.1;AES256
+                    33336136383538353365663330663666616438363861623538626137306635396237653831656239
+                    6361613861373161663066613233633038623062646135390a343766623737303736363937336439
+                    31393233353835316366633939333031313932353065313039303838323736626636366236623936
+                    3638353634336535640a396533333364303465333332643832386631663531346632353734346336
+                    37313534323363383931313865336330353164636338653531353532313063326530313565353936
+                    6230376431613439633463333836623039393333373064383537
+  - name: Create issuer
+    tags: ingress
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: cert-manager.io/v1
+        kind: Issuer
+        metadata:
+          name: letsencrypt-staging
+          namespace: development
+        spec:
+          acme:
+            # The ACME server URL
+            server: https://acme-staging-v02.api.letsencrypt.org/directory
+            # Email address used for ACME registration
+            email: podoi@me.com
+            # Name of a secret used to store the ACME account private key
+            privateKeySecretRef:
+              name: letsencrypt-staging
+            # Enable the HTTP-01 challenge provider
+            solvers:
+              - dns01:
+                  cloudflare:
+                    email: podoi@me.com
+                    apiTokenSecretRef:
+                      name: cloudflare-api-key-secret
+                      key: api-key
+  - name: Install ingress nginx Chart
+    tags: ingress
+  #  become: true
+#    become_user: root
+    kubernetes.core.helm:
+      name: ingress-nginx
+      namespace: development
+      chart_ref: ingress-nginx/ingress-nginx
+  - name: Install ingress Chart
+    tags: ingress, websites
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: website
+          namespace: development
+          annotations:
+            cert-manager.io/issuer: "letsencrypt-staging"
+            #kubernetes.io/ingress.class: traefik
+            #kubernetes.io/ingress.class: nginx
+        spec:
+          ingressClassName: nginx
+          tls:
+          - hosts:
+            - joserod.space
+            secretName: joserod-tls
+            # - demo.joserod.space
+            # secretName: joserod-tls
+          - hosts:
+            - wellbeingportal.app
+            secretName: wellbeingportal-tls
+          - hosts:
+            - jackbonardicpa.com
+            secretName: jackbonardicpa-tls
+          rules:
+          - host: joserod.space
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: personal-website
+                    port:
+                      number: 80
+          - host: jackbonardicpa.com
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: jackcocpa-helm
+                    port:
+                      number: 8080
+          #- host: wellbeingportal.app
+          #  http:
+          #    paths:
+          #    - path: /
+          #      pathType: Prefix
+          #      backend:
+          #        service:
+          #          name: kuard
+          #          port:
+          #            number: 80
+  - name: Install Redis Chart
+    tags: wbp
+    #become: true
+    #become_user: root
+    kubernetes.core.helm:
+      name: redis
+      namespace: development
+      chart_ref: bitnami/redis
+# add secrets
+  - name: Create mariadb as db secret
+    tags: mariadb
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: mariadb
+          namespace: mariadb
+        type: Opaque
+        stringData:
+          mariadb-root-password: !vault |
+                    $ANSIBLE_VAULT;1.1;AES256
+                    30623435383438336265623239623962353232653366316332396436393331616264313635366165
+                    6532313731616534366335613339303038306237633932630a633837343835656664316364626232
+                    61353635656564633830393239666264623937336361666339643762633832306137366262366165
+                    6665313039383062350a653539363838313363613464653466336434356161326634623835663763
+                    3162
+          mariadb-replication-password: !vault |
+                    $ANSIBLE_VAULT;1.1;AES256
+                    63303535336463653865386232383730616566336535653833396336323236356135663131373533
+                    6137356632643363373931373035626465656638643034360a323162636439346633326162653835
+                    35306565346139333335616131383137323265663337633063366566383435313930383761323233
+                    6233393432393330310a353962663266666664636232353532323634336364383965343566646434
+                    6434
+          mariadb-password: !vault |
+                    $ANSIBLE_VAULT;1.1;AES256
+                    34363535616531643336353231633739346438373562656334376439353839313238316231383336
+                    3863343664316331303464336163633165356531616664320a313737383237636137363136356138
+                    33383436326533643039363662346461626461326536396234616663306561336337333465643465
+                    3935616334323462630a376634363437316530616664623965643036343935636264373865373437
+                    6137
+  - name: Install mariadb as DB
+    tags: mariadb
+    # become: true
+    # become_user: root
+    kubernetes.core.helm:
+      name: mariadb
+      namespace: mariadb
+      chart_ref: bitnami/mariadb
+      values:
+        auth:
+          existingSecret: "mariadb"
+        primary:
+          service:
+            type: LoadBalancer
+  # - name: Install Redis as DB
+  #   tags: redis
+  #   # become: true
+  #   # become_user: root
+  #   kubernetes.core.helm:
+  #     name: redis
+  #     namespace: redis
+  #     chart_ref: bitnami/redis
+  #     values:
+  #       auth:
+  #         existingSecret: "redis-root"
+  #         existingSecretPasswordKey: "redis-password"
+  #       image:
+  #         repository: "redis/redis-stack-server"
+  #         tag: "7.2.0-v0-arm64"
+  #       master:
+  #         args:
+  #           - -c
+  #           - /opt/bitnami/scripts/merged-start-scripts/start-master.sh
+  #         extraVolumes:
+  #           - name: merged-start-scripts
+  #             configMap:
+  #               name: bitnami-redis-stack-server-merged
+  #               defaultMode: 0755
+  #         extraVolumeMounts:
+  #           - name: merged-start-scripts
+  #             mountPath: /opt/bitnami/scripts/merged-start-scripts
+  #       replica:
+  #         args:
+  #           - -c
+  #           - /opt/bitnami/scripts/merged-start-scripts/start-replica.sh
+  #         extraVolumes:
+  #           - name: merged-start-scripts
+  #             configMap:
+  #               name: bitnami-redis-stack-server-merged
+  #               defaultMode: 0755
+  #         extraVolumeMounts:
+  #           - name: merged-start-scripts
+  #             mountPath: /opt/bitnami/scripts/merged-start-scripts
+  #       extraDeploy:
+  #         - apiVersion: v1
+  #           kind: ConfigMap
+  #           metadata:
+  #             name: bitnami-redis-stack-server-merged
+  #           data:
+  #             start-master.sh: |
+  #               #!/usr/bin/dumb-init /bin/bash
+  #               ### docker entrypoint script, for starting redis stack
+  #               BASEDIR=/opt/redis-stack
+  #               cd \${BASEDIR}
+  #               CMD=\${BASEDIR}/bin/redis-server
+  #               if [ -z "\${REDISEARCH_ARGS}" ]; then
+  #               REDISEARCH_ARGS="MAXSEARCHRESULTS 10000 MAXAGGREGATERESULTS 10000"
+  #               fi
+  #               if [ -z "\${REDISGRAPH_ARGS}" ]; then
+  #               REDISGRAPH_ARGS="MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE 10000"
+  #               fi
+  #               [[ -f \$REDIS_PASSWORD_FILE ]] && export REDIS_PASSWORD="\$(< "\${REDIS_PASSWORD_FILE}")"
+  #               if [[ -f /opt/bitnami/redis/mounted-etc/master.conf ]];then
+  #                   cp /opt/bitnami/redis/mounted-etc/master.conf /opt/bitnami/redis/etc/master.conf
+  #               fi
+  #               if [[ -f /opt/bitnami/redis/mounted-etc/redis.conf ]];then
+  #                   cp /opt/bitnami/redis/mounted-etc/redis.conf /opt/bitnami/redis/etc/redis.conf
+  #               fi
+  #               \${CMD} \
+  #               --port "\${REDIS_PORT}" \
+  #               --requirepass "\${REDIS_PASSWORD}" \
+  #               --masterauth "\${REDIS_PASSWORD}" \
+  #               --include "/opt/bitnami/redis/etc/redis.conf" \
+  #               --include "/opt/bitnami/redis/etc/master.conf" \
+  #               --loadmodule /opt/redis-stack/lib/redisearch.so \${REDISEARCH_ARGS} \
+  #               #--loadmodule /opt/redis-stack/lib/redisgraph.so \${REDISGRAPH_ARGS} \
+  #               --loadmodule /opt/redis-stack/lib/redistimeseries.so \${REDISTIMESERIES_ARGS} \
+  #               --loadmodule /opt/redis-stack/lib/rejson.so \${REDISJSON_ARGS} \
+  #               --loadmodule /opt/redis-stack/lib/redisbloom.so \${REDISBLOOM_ARGS}
+  #             start-replica.sh: |
+  #               #!/usr/bin/dumb-init /bin/bash
+  #               BASEDIR=/opt/redis-stack
+  #               cd \${BASEDIR}
+  #               CMD=\${BASEDIR}/bin/redis-server
+  #               get_port() {
+  #                   hostname="\$1"
+  #                   type="\$2"
+  #                   port_var=\$(echo "\${hostname^^}_SERVICE_PORT_\$type" | sed "s/-/_/g")
+  #                   port=\${!port_var}
+  #                   if [ -z "\$port" ]; then
+  #                       case \$type in
+  #                           "SENTINEL")
+  #                               echo 26379
+  #                               ;;
+  #                           "REDIS")
+  #                               echo 6379
+  #                               ;;
+  #                       esac
+  #                   else
+  #                       echo \$port
+  #                   fi
+  #               }
+  #               get_full_hostname() {
+  #                   hostname="\$1"
+  #                   echo "\${hostname}.\${HEADLESS_SERVICE}"
+  #               }
+  #               REDISPORT=\$(get_port "\$HOSTNAME" "REDIS")
+  #               [[ -f \$REDIS_PASSWORD_FILE ]] && export REDIS_PASSWORD="\$(< "\${REDIS_PASSWORD_FILE}")"
+  #               [[ -f \$REDIS_MASTER_PASSWORD_FILE ]] && export REDIS_MASTER_PASSWORD="\$(< "\${REDIS_MASTER_PASSWORD_FILE}")"
+  #               if [[ -f /opt/bitnami/redis/mounted-etc/replica.conf ]];then
+  #                   cp /opt/bitnami/redis/mounted-etc/replica.conf /opt/bitnami/redis/etc/replica.conf
+  #               fi
+  #               if [[ -f /opt/bitnami/redis/mounted-etc/redis.conf ]];then
+  #                   cp /opt/bitnami/redis/mounted-etc/redis.conf /opt/bitnami/redis/etc/redis.conf
+  #               fi
+  #               echo "" >> /opt/bitnami/redis/etc/replica.conf
+  #               echo "replica-announce-port \$REDISPORT" >> /opt/bitnami/redis/etc/replica.conf
+  #               echo "replica-announce-ip \$(get_full_hostname "\$HOSTNAME")" >> /opt/bitnami/redis/etc/replica.conf
+  #               \${CMD} \
+  #               --port "\${REDIS_PORT}" \
+  #               --requirepass "\${REDIS_PASSWORD}" \
+  #               --masterauth "\${REDIS_PASSWORD}" \
+  #               --include "/opt/bitnami/redis/etc/redis.conf" \
+  #               --include "/opt/bitnami/redis/etc/replica.conf" \
+  #               --loadmodule /opt/redis-stack/lib/redisearch.so \${REDISEARCH_ARGS} \
+  #               #--loadmodule /opt/redis-stack/lib/redisgraph.so \${REDISGRAPH_ARGS} \
+  #               --loadmodule /opt/redis-stack/lib/redistimeseries.so \${REDISTIMESERIES_ARGS} \
+  #               --loadmodule /opt/redis-stack/lib/rejson.so \${REDISJSON_ARGS} \
+  #               --loadmodule /opt/redis-stack/lib/redisbloom.so \${REDISBLOOM_ARGS}
